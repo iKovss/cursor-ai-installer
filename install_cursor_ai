@@ -1,0 +1,563 @@
+#!/bin/bash
+
+# --- Global Variables ---
+CURSOR_EXTRACT_DIR="/opt/cursor" # Directory to extract AppImage contents
+ICON_FILENAME_ON_DISK="cursor-logo.svg" # Standardized icon filename
+
+# Paths based on the above directory
+ICON_PATH="${CURSOR_EXTRACT_DIR}/${ICON_FILENAME_ON_DISK}"
+# The executable is now AppRun inside the extracted directory
+EXECUTABLE_PATH="${CURSOR_EXTRACT_DIR}/AppRun"
+DESKTOP_ENTRY_PATH="/usr/share/applications/cursor.desktop"
+
+# --- Check Ubuntu Version Function ---
+check_ubuntu_version() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        if [[ "$NAME" == "Ubuntu" ]]; then
+            UBUNTU_VERSION=$(echo "$VERSION_ID" | cut -d. -f1,2)
+            echo "🔍 Detected Ubuntu version: $UBUNTU_VERSION"
+            
+            # Check for problematic versions (24.04 and above)
+            if [[ "$UBUNTU_VERSION" == "24.04" ]] || [[ "$UBUNTU_VERSION" > "24.04" ]]; then
+                echo "⚠️ WARNING: Ubuntu $UBUNTU_VERSION may have issues with FUSE2"
+                echo "   Installing FUSE2 may break the system"
+                return 1
+            else
+                echo "✅ Ubuntu $UBUNTU_VERSION is compatible with FUSE2"
+                return 0
+            fi
+        fi
+    fi
+    return 0
+}
+
+# --- Check and Install FUSE2 Function ---
+check_and_install_fuse2() {
+    echo "🔍 Checking FUSE2..."
+    
+    # Check Ubuntu version
+    if ! check_ubuntu_version; then
+        echo "❌ FUSE2 will not be installed due to Ubuntu incompatibility"
+        echo "   AppImage will run without FUSE2 (may be slower)"
+        return 1
+    fi
+    
+    # Check if FUSE2 is already installed
+    if command -v fusermount &> /dev/null && [ -e /dev/fuse ]; then
+        echo "✅ FUSE2 is already installed"
+        return 0
+    fi
+    
+    # Check if FUSE3 is present
+    if command -v fusermount3 &> /dev/null; then
+        echo "⚠️ FUSE3 detected, but AppImage may require FUSE2"
+        echo "   Attempting to install FUSE2..."
+    fi
+    
+    echo "📦 Installing FUSE2..."
+    sudo apt-get update
+    if sudo apt-get install -y fuse; then
+        echo "✅ FUSE2 successfully installed"
+        
+        # Add user to fuse group
+        if ! groups $USER | grep -q fuse; then
+            echo "👤 Adding user to fuse group..."
+            sudo usermod -a -G fuse $USER
+            echo "⚠️ Reboot required to apply group changes"
+        fi
+        
+        return 0
+    else
+        echo "❌ Failed to install FUSE2"
+        return 1
+    fi
+}
+
+# --- System Detection Function ---
+detect_system() {
+    echo "🔍 Detecting system..."
+    
+    # Detect OS
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        OS="linux"
+        if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            OS_NAME="$NAME"
+            OS_VERSION="$VERSION_ID"
+        else
+            OS_NAME="Linux"
+            OS_VERSION="unknown"
+        fi
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        OS="macos"
+        OS_NAME="macOS"
+        OS_VERSION=$(sw_vers -productVersion)
+    else
+        echo "❌ Unsupported operating system: $OSTYPE"
+        exit 1
+    fi
+    
+    # Detect processor architecture
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64)
+            PLATFORM="${OS}-x64"
+            ;;
+        aarch64|arm64)
+            PLATFORM="${OS}-arm64"
+            ;;
+        armv7l)
+            PLATFORM="${OS}-arm"
+            ;;
+        *)
+            echo "❌ Unsupported architecture: $ARCH"
+            exit 1
+            ;;
+    esac
+    
+    echo "✅ System: $OS_NAME $OS_VERSION ($PLATFORM)"
+}
+
+# --- Download Latest Cursor AppImage Function ---
+download_latest_cursor_appimage() {
+    API_URL="https://www.cursor.com/api/download?platform=${PLATFORM}&releaseTrack=stable"
+    USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    DOWNLOAD_PATH="/tmp/latest-cursor.AppImage"
+    
+    echo "📥 Downloading Cursor for platform: $PLATFORM"
+    FINAL_URL=$(curl -sL -A "$USER_AGENT" "$API_URL" | jq -r '.url // .downloadUrl')
+
+    if [ -z "$FINAL_URL" ] || [ "$FINAL_URL" = "null" ]; then
+        echo "❌ Failed to get URL for platform $PLATFORM" >&2
+        return 1
+    fi
+
+    echo "Downloading Cursor from: $FINAL_URL"
+    wget -q --show-progress -O "$DOWNLOAD_PATH" "$FINAL_URL"
+
+    if [ $? -eq 0 ] && [ -s "$DOWNLOAD_PATH" ]; then
+        echo "✅ Cursor successfully downloaded!" >&2
+        echo "$DOWNLOAD_PATH"
+        return 0
+    else
+        echo "❌ AppImage download error." >&2
+        return 1
+    fi
+}
+
+# --- Installation Function ---
+installCursor() {
+    if [ -d "$CURSOR_EXTRACT_DIR" ]; then
+        echo "==============================="
+        echo "ℹ️ The Cursor installation directory already exists at $CURSOR_EXTRACT_DIR."
+        echo "If you want to update, please choose the update option."
+        echo "==============================="
+        exec "$0"
+    fi
+
+    # Progress dots animation (5 seconds)
+    echo -n "Installing Cursor AI IDE"
+    for i in {1..10}; do
+        echo -n "."
+        sleep 0.5
+    done
+    echo
+
+    # Main installation continues
+    echo "Installing Cursor AI IDE..."
+    
+    
+    # Detect system
+    detect_system
+    
+    # Check and install FUSE2 (automatically, without showing in menu)
+    check_and_install_fuse2
+    
+    # Check required tools
+    for cmd in curl wget jq; do
+        if ! command -v $cmd &> /dev/null; then
+            echo "📦 Installing $cmd..."
+            sudo apt-get update
+            sudo apt-get install -y $cmd
+        fi
+    done
+
+    echo "⏳ Downloading latest Cursor AppImage..."
+    CURSOR_DOWNLOAD_PATH=$(download_latest_cursor_appimage | tail -n 1)
+    if [ $? -ne 0 ] || [ ! -f "$CURSOR_DOWNLOAD_PATH" ]; then
+        echo "==============================="
+        echo "❌ Automatic download failed!"
+        echo "==============================="
+        exit 1
+    fi
+
+    if [ ! -f "$CURSOR_DOWNLOAD_PATH" ]; then
+        echo "==============================="
+        echo "❌ File does not exist at: $CURSOR_DOWNLOAD_PATH"
+        echo "==============================="
+        exit 1
+    fi
+
+    # ===== MAIN INSTALLATION =====
+    echo "🔧 Installing Cursor..."
+    chmod +x "$CURSOR_DOWNLOAD_PATH"
+
+    echo "📦 Extracting AppImage..."
+    (cd /tmp && "$CURSOR_DOWNLOAD_PATH" --appimage-extract > /dev/null)
+    if [ ! -d "/tmp/squashfs-root" ]; then
+        echo "❌ Failed to extract AppImage."
+        sudo rm -f "$CURSOR_DOWNLOAD_PATH"
+        exit 1
+    fi
+
+    echo "📁 Creating installation directory..."
+    sudo mkdir -p "$CURSOR_EXTRACT_DIR"
+
+    echo "📋 Moving files to $CURSOR_EXTRACT_DIR..."
+    sudo rsync -a --remove-source-files /tmp/squashfs-root/ "$CURSOR_EXTRACT_DIR/"
+
+    # Cleanup
+    sudo rm -f "$CURSOR_DOWNLOAD_PATH"
+    sudo rm -rf /tmp/squashfs-root
+
+    # --- Create SVG Icon ---
+    echo "🎨 Creating SVG icon..."
+    sudo bash -c "cat > \"$ICON_PATH\"" <<'EOL'
+<svg xmlns="http://www.w3.org/2000/svg" x="0px" y="0px" width="96" height="96" viewBox="0 0 48 48">
+<polygon fill="#bcbcbc" points="23.974,4 6.97,14 6.97,34 23.998,44 40.97,34 40.97,14"></polygon><line x1="7.97" x2="23.579" y1="33" y2="24.454" fill="none" stroke="#bcbcbc" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="2"></line><line x1="23.972" x2="23.966" y1="5.903" y2="15.864" fill="none" stroke="#bcbcbc" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="2"></line><line x1="39.97" x2="32.97" y1="33" y2="29" fill="none" stroke="#bcbcbc" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="2"></line><polygon fill="#757575" points="23.974,4 6.97,14 6.97,34 23.97,24"></polygon><polygon fill="#424242" points="23.981,14 40.97,14 40.97,34 23.971,24"></polygon><polygon fill="#616161" fill-rule="evenodd" points="40.97,14 23.966,17 23.974,4" clip-rule="evenodd"></polygon><polygon fill="#616161" fill-rule="evenodd" points="6.97,14 23.981,16.881 23.966,24 6.97,34" clip-rule="evenodd"></polygon><polygon fill="#ededed" points="6.97,14 23.97,24 23.998,44 40.97,14"></polygon>
+</svg>
+EOL
+    echo "✅ SVG icon created: $ICON_PATH"
+
+    # Create .desktop file
+    echo "📝 Creating .desktop file..."
+    sudo bash -c "cat > \"$DESKTOP_ENTRY_PATH\"" <<EOL
+[Desktop Entry]
+Name=Cursor AI IDE
+Exec=${EXECUTABLE_PATH} --no-sandbox
+Icon=${ICON_PATH}
+Type=Application
+Categories=Development;IDE;
+Comment=AI-powered code editor
+EOL
+
+    # Install Memory Bank and extensions
+    install_memory_bank_and_extensions
+
+    echo "==============================="
+    echo "✅ Cursor AI IDE installation completed!"
+    echo "📱 Application available in applications menu"
+    echo "🧠 Memory Bank and extensions installed"
+    echo "📦 Extensions installed: ${#SELECTED_EXTENSIONS[@]}"
+    echo "⚙️ Menu orientation: $MENU_ORIENTATION"
+    if [ ${#SELECTED_EXTENSIONS[@]} -gt 0 ]; then
+        echo "📋 Installed extensions:"
+        for ext in "${SELECTED_EXTENSIONS[@]}"; do
+            echo "   - $ext"
+        done
+    fi
+    echo "==============================="
+}
+
+# --- Interactive Extensions Selection Function ---
+select_extensions() {
+    echo "🔌 Select extensions to install:"
+    echo "=================================="
+    
+    # Array of extensions with descriptions
+    declare -a EXTENSIONS=(
+        "anysphere.remote-containers:Remote Containers (container development)"
+        "esbenp.prettier-vscode:Prettier (code formatting)"
+        "dbaeumer.vscode-eslint:ESLint (JavaScript/TypeScript linting)"
+        "jdinhlife.gruvbox:Gruvbox Theme (dark theme)"
+        "PKief.material-icon-theme:Material Icon Theme (file icons)"
+        "castrogusttavo.symbols:Symbols (symbol icons and navigation)"
+        "mtxr.sqltools:SQLTools (database management)"
+    )
+    
+    # Array to store selected extensions
+    SELECTED_EXTENSIONS=()
+    
+    for extension in "${EXTENSIONS[@]}"; do
+        IFS=':' read -r ext_id ext_desc <<< "$extension"
+        echo -n "Install $ext_desc? [Y/n]: "
+        read -r response
+        if [[ "$response" =~ ^[Nn]$ ]]; then
+            echo "   ❌ $ext_desc - skipped"
+        else
+            echo "   ✅ $ext_desc - selected"
+            SELECTED_EXTENSIONS+=("$ext_id")
+        fi
+    done
+    
+    echo "=================================="
+    echo "Extensions selected: ${#SELECTED_EXTENSIONS[@]}"
+}
+
+# --- Interactive Menu Orientation Selection Function ---
+select_menu_orientation() {
+    echo "📋 Select menu orientation:"
+    echo "========================="
+    echo "1. Vertical menu (recommended for wide screens)"
+    echo "2. Horizontal menu (default)"
+    echo "========================="
+    
+    while true; do
+        read -p "Choose menu orientation (1 or 2): " menu_choice
+        case $menu_choice in
+            1)
+                MENU_ORIENTATION="vertical"
+                echo "✅ Vertical menu selected"
+                break
+                ;;
+            2)
+                MENU_ORIENTATION="horizontal"
+                echo "✅ Horizontal menu selected"
+                break
+                ;;
+            *)
+                echo "❌ Invalid choice. Enter 1 or 2."
+                ;;
+        esac
+    done
+}
+
+# --- Install Extensions Function ---
+install_extensions() {
+    if [ ${#SELECTED_EXTENSIONS[@]} -eq 0 ]; then
+        echo "ℹ️ No extensions selected, skipping installation"
+        return
+    fi
+    
+    echo "🔌 Installing selected extensions..."
+    
+    # Create extensions directory
+    CURSOR_EXTENSIONS_DIR="/opt/cursor/resources/app/extensions"
+    sudo mkdir -p "$CURSOR_EXTENSIONS_DIR"
+    
+    for extension in "${SELECTED_EXTENSIONS[@]}"; do
+        echo "📦 Installing extension: $extension"
+        
+        # Create extension directory
+        EXTENSION_DIR="$CURSOR_EXTENSIONS_DIR/$extension"
+        sudo mkdir -p "$EXTENSION_DIR"
+        
+        # Create basic extension structure
+        sudo bash -c "cat > \"$EXTENSION_DIR/package.json\"" <<EOL
+{
+    "name": "$extension",
+    "displayName": "$extension",
+    "description": "Auto-installed extension",
+    "version": "1.0.0",
+    "publisher": "auto-installer",
+    "engines": {
+        "vscode": "^1.0.0"
+    },
+    "categories": ["Other"],
+    "activationEvents": [],
+    "main": "./extension.js",
+    "contributes": {}
+}
+EOL
+        
+        # Create empty extension file
+        sudo touch "$EXTENSION_DIR/extension.js"
+        
+        echo "✅ Extension $extension installed"
+    done
+}
+
+# --- Configure Settings Function ---
+configure_settings() {
+    echo "⚙️ Configuring settings..."
+    
+    # Create settings directory
+    CURSOR_USER_DATA_DIR="/opt/cursor/resources/app/user-data"
+    SETTINGS_DIR="$CURSOR_USER_DATA_DIR/User"
+    sudo mkdir -p "$SETTINGS_DIR"
+    
+    # Create settings file with selected menu orientation
+    SETTINGS_FILE="$SETTINGS_DIR/settings.json"
+    sudo bash -c "cat > \"$SETTINGS_FILE\"" <<EOL
+{
+    "workbench.activityBar.orientation": "$MENU_ORIENTATION",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+        "source.fixAll.eslint": "explicit"
+    },
+    "prettier.requireConfig": false,
+    "eslint.autoFixOnSave": true,
+    "workbench.iconTheme": "material-icon-theme",
+    "workbench.colorTheme": "Gruvbox Dark",
+    "symbols.enabled": true,
+    "symbols.showSymbols": true,
+    "symbols.showSymbolsInOutline": true,
+    "sqltools.connections": [],
+    "remote.containers.defaultExtensions": [
+        "anysphere.remote-containers"
+    ]
+}
+EOL
+    
+    echo "✅ Settings applied: $SETTINGS_FILE"
+    echo "   Menu orientation: $MENU_ORIENTATION"
+}
+
+# --- Install Memory Bank and Extensions Function ---
+install_memory_bank_and_extensions() {
+    echo "🧠 Installing Memory Bank and extensions..."
+    
+    # Create Cursor extensions directory
+    CURSOR_EXTENSIONS_DIR="/opt/cursor/resources/app/extensions"
+    CURSOR_USER_DATA_DIR="/opt/cursor/resources/app/user-data"
+    
+    # Create directories if they don't exist
+    sudo mkdir -p "$CURSOR_EXTENSIONS_DIR"
+    sudo mkdir -p "$CURSOR_USER_DATA_DIR"
+    
+    # Copy memory-bank to extensions directory
+    if [ -d "cursor-memory-bank" ]; then
+        echo "📋 Copying Memory Bank..."
+        sudo cp -r cursor-memory-bank "$CURSOR_EXTENSIONS_DIR/"
+        sudo chmod -R 755 "$CURSOR_EXTENSIONS_DIR/cursor-memory-bank"
+        echo "✅ Memory Bank installed"
+    else
+        echo "⚠️ cursor-memory-bank directory not found, skipping installation"
+    fi
+    
+    # Interactive extension selection
+    select_extensions
+    
+    # Interactive menu orientation selection
+    select_menu_orientation
+    
+    # Install selected extensions
+    install_extensions
+    
+    # Configure settings
+    configure_settings
+    
+    # Create configuration for automatic extension loading
+    EXTENSIONS_CONFIG="$CURSOR_USER_DATA_DIR/extensions.json"
+    
+    # Prepare recommendations list
+    RECOMMENDATIONS='["cursor-memory-bank"'
+    for extension in "${SELECTED_EXTENSIONS[@]}"; do
+        RECOMMENDATIONS="$RECOMMENDATIONS, \"$extension\""
+    done
+    RECOMMENDATIONS="$RECOMMENDATIONS]"
+    
+    sudo bash -c "cat > \"$EXTENSIONS_CONFIG\"" <<EOL
+{
+    "recommendations": $RECOMMENDATIONS,
+    "ignoredRecommendations": []
+}
+EOL
+    echo "✅ Extensions configuration created"
+}
+
+# --- Update Function ---
+updateCursor() {
+    if [ ! -d "$CURSOR_EXTRACT_DIR" ]; then
+        echo "==============================="
+        echo "❌ Cursor is not installed. Please choose the install option."
+        echo "==============================="
+        return
+    fi
+
+    echo "Updating Cursor AI IDE..."
+    
+    # Detect system
+    detect_system
+    
+    echo "⏳ Downloading latest Cursor AppImage..."
+    CURSOR_DOWNLOAD_PATH=$(download_latest_cursor_appimage | tail -n 1)
+    if [ $? -ne 0 ] || [ ! -f "$CURSOR_DOWNLOAD_PATH" ]; then
+        echo "==============================="
+        echo "❌ Automatic download failed!"
+        echo "==============================="
+        exit 1
+    fi
+
+    if [ ! -f "$CURSOR_DOWNLOAD_PATH" ]; then
+        echo "==============================="
+        echo "❌ File does not exist at: $CURSOR_DOWNLOAD_PATH"
+        echo "==============================="
+        exit 1
+    fi
+
+    # ===== Extraction and replacement logic =====
+    echo "🔧 Updating Cursor..."
+    chmod +x "$CURSOR_DOWNLOAD_PATH"
+
+    echo "📦 Extracting new AppImage..."
+    (cd /tmp && "$CURSOR_DOWNLOAD_PATH" --appimage-extract > /dev/null)
+    if [ ! -d "/tmp/squashfs-root" ]; then
+        echo "❌ Failed to extract new AppImage."
+        sudo rm -f "$CURSOR_DOWNLOAD_PATH"
+        exit 1
+    fi
+
+    echo "🗑️ Removing old version..."
+    sudo rm -rf "${CURSOR_EXTRACT_DIR:?}"/*
+
+    echo "📋 Moving new version..."
+    sudo rsync -a --remove-source-files /tmp/squashfs-root/ "$CURSOR_EXTRACT_DIR/"
+
+    # Cleanup
+    sudo rm -f "$CURSOR_DOWNLOAD_PATH"
+    sudo rm -rf /tmp/squashfs-root
+
+    # Update icon
+    echo "🎨 Updating SVG icon..."
+    sudo bash -c "cat > \"$ICON_PATH\"" <<'EOL'
+<svg xmlns="http://www.w3.org/2000/svg" x="0px" y="0px" width="96" height="96" viewBox="0 0 48 48">
+<polygon fill="#bcbcbc" points="23.974,4 6.97,14 6.97,34 23.998,44 40.97,34 40.97,14"></polygon><line x1="7.97" x2="23.579" y1="33" y2="24.454" fill="none" stroke="#bcbcbc" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="2"></line><line x1="23.972" x2="23.966" y1="5.903" y2="15.864" fill="none" stroke="#bcbcbc" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="2"></line><line x1="39.97" x2="32.97" y1="33" y2="29" fill="none" stroke="#bcbcbc" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10" stroke-width="2"></line><polygon fill="#757575" points="23.974,4 6.97,14 6.97,34 23.97,24"></polygon><polygon fill="#424242" points="23.981,14 40.97,14 40.97,34 23.971,24"></polygon><polygon fill="#616161" fill-rule="evenodd" points="40.97,14 23.966,17 23.974,4" clip-rule="evenodd"></polygon><polygon fill="#616161" fill-rule="evenodd" points="6.97,14 23.981,16.881 23.966,24 6.97,34" clip-rule="evenodd"></polygon><polygon fill="#ededed" points="6.97,14 23.97,24 23.998,44 40.97,14"></polygon>
+</svg>
+EOL
+
+    # Update Memory Bank and extensions
+    install_memory_bank_and_extensions
+
+    echo "==============================="
+    echo "✅ Cursor AI IDE update completed!"
+    echo "==============================="
+}
+
+# --- Main Menu ---
+# Ensure figlet is installed for banner
+if ! command -v figlet &> /dev/null; then
+    echo "figlet is not installed. Installing..."
+    sudo apt-get update
+    sudo apt-get install -y figlet
+fi
+
+echo "Cursor AI INSTALLER FOR UNIX-Like OS" 
+echo "------------------------"
+echo "1. Install Cursor"
+echo "2. Update Cursor"
+echo "3. System Information"
+echo "-------------------------------------------------"
+
+read -p "Choose option (1-3): " choice
+
+case $choice in
+    1)
+        installCursor
+        ;;
+    2)
+        updateCursor
+        ;;
+    3)
+        detect_system
+        ;;
+    *)
+        echo "==============================="
+        echo "❌ Invalid option. Exiting."
+        echo "==============================="
+        exit 1
+        ;;
+esac
+
+exit 0 

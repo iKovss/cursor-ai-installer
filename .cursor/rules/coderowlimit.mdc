@@ -1,0 +1,15 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+### 📌 Code Generation Guidelines
+
+- **Maximum file length: 350 lines of code**
+- If the implementation exceeds this limit:
+  - Split the code into **multiple files/modules**
+  - Keep related functionality grouped in each file
+- Always use modular design:
+  - Expose necessary functions/classes in separate modules
+  - Import and reuse them where needed
+- Prioritize readability, maintainability, and separation of concerns
